@@ -1,0 +1,237 @@
+# Builds and tests MirrorMod on every push and pull request, and releases it.
+#
+# Versioning: the version in CMakeLists.txt (project(MirrorMod VERSION x.y.z)) is the only source of truth.
+# - A push to main whose version has no tag yet builds a release: the tag vX.Y.Z and a GitHub release with the
+#   packaged mod are created automatically, using the version's section of CHANGELOG.md as the notes.
+# - Pushing a tag vX.Y.Z by hand does the same, provided it matches the version in CMakeLists.txt.
+# - Every other build is a development build, versioned X.Y.Z-dev.<run>+<commit>, and kept as a workflow artifact.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The vcpkg version the README pins. The one of the official SDK sample no longer works.
+  VCPKG_COMMIT: ec48c11eae9448c8c6e7739d93e06fa2433aa95f
+  BUILD_CONFIG: RelWithDebInfo
+
+jobs:
+  version:
+    name: Determine version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      full: ${{ steps.version.outputs.full }}
+      suffix: ${{ steps.version.outputs.suffix }}
+      tag: ${{ steps.version.outputs.tag }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read and check version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION=$(sed -nE 's/^project\(MirrorMod VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)
+          if [ -z "$VERSION" ]; then
+            echo "::error file=CMakeLists.txt::No version found in project(MirrorMod VERSION x.y.z)"
+            exit 1
+          fi
+
+          MANIFEST_VERSION=$(jq -r .version vcpkg.json)
+          if [ "$MANIFEST_VERSION" != "$VERSION" ]; then
+            echo "::error file=vcpkg.json::vcpkg.json has version $MANIFEST_VERSION, CMakeLists.txt has $VERSION. Use scripts/Set-Version.ps1."
+            exit 1
+          fi
+
+          TAG="v$VERSION"
+          RELEASE=false
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            if [ "$GITHUB_REF_NAME" != "$TAG" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match version $VERSION in CMakeLists.txt"
+              exit 1
+            fi
+            RELEASE=true
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+              echo "::notice::$TAG is already released, this is a development build. Raise the version to release again."
+            else
+              RELEASE=true
+            fi
+          fi
+
+          if ! grep -qE "^## \[$VERSION\]" CHANGELOG.md; then
+            if [ "$RELEASE" = "true" ]; then
+              echo "::error file=CHANGELOG.md::CHANGELOG.md has no section '## [$VERSION]', which the release notes are taken from"
+              exit 1
+            fi
+            echo "::warning file=CHANGELOG.md::CHANGELOG.md has no section for $VERSION yet"
+          fi
+
+          if [ "$RELEASE" = "true" ]; then
+            SUFFIX=""
+          else
+            SUFFIX="-dev.${GITHUB_RUN_NUMBER}+${GITHUB_SHA::7}"
+          fi
+
+          {
+            echo "version=$VERSION"
+            echo "suffix=$SUFFIX"
+            echo "full=$VERSION$SUFFIX"
+            echo "tag=$TAG"
+            echo "release=$RELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "### MirrorMod $VERSION$SUFFIX" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release: $RELEASE" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build and test
+    needs: version
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-cache
+      FULL_VERSION: ${{ needs.version.outputs.full }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: .vcpkg-cache
+          key: vcpkg-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ env.VCPKG_COMMIT }}-
+
+      - name: Set up vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .vcpkg-cache | Out-Null
+          git init -q vcpkg
+          git -C vcpkg fetch -q --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_COMMIT
+          git -C vcpkg checkout -q FETCH_HEAD
+          ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B _build/ci -A x64 `
+            "-DCMAKE_TOOLCHAIN_FILE=$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DVCPKG_HOST_TRIPLET=x64-windows-static `
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DMIRRORMOD_BUILD_TESTS=ON `
+            "-DMIRRORMOD_VERSION_SUFFIX=${{ needs.version.outputs.suffix }}"
+
+      - name: Build
+        run: cmake --build _build/ci --config ${{ env.BUILD_CONFIG }} --parallel
+
+      - name: Test
+        run: ctest --test-dir _build/ci -C ${{ env.BUILD_CONFIG }} --output-on-failure -E "MirrorFlipTest|AudioSwapTest"
+
+      # These need a GPU and an audio device. The runners have neither for sure, so they only inform.
+      - name: Test with GPU and audio device
+        continue-on-error: true
+        run: ctest --test-dir _build/ci -C ${{ env.BUILD_CONFIG }} --output-on-failure -R "MirrorFlipTest|AudioSwapTest"
+
+      - name: Check version of the DLL
+        shell: pwsh
+        run: |
+          $Info = (Get-Item "_build/ci/$env:BUILD_CONFIG/MirrorMod.dll").VersionInfo
+          if ($Info.ProductVersion -ne $env:FULL_VERSION) {
+            throw "MirrorMod.dll has version $($Info.ProductVersion), expected $env:FULL_VERSION"
+          }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $Name = "MirrorMod-$env:FULL_VERSION"
+          $Bin = "_build/ci/$env:BUILD_CONFIG"
+          $Stage = "_package/$Name"
+          New-Item -ItemType Directory -Force $Stage, dist | Out-Null
+
+          Copy-Item "$Bin/MirrorMod.dll", LICENSE, NOTICE, THIRD_PARTY_NOTICES, README.md, CHANGELOG.md $Stage
+
+          # GPL-3.0 requires a binary release to say where its source code is.
+          @(
+            "MirrorMod $env:FULL_VERSION by NLS-04"
+            ""
+            "Source code: ${{ github.server_url }}/${{ github.repository }}"
+            "Commit:      ${{ github.sha }}"
+            ""
+            "Installation: copy MirrorMod.dll to Retail/mods in the game folder, see README.md."
+          ) | Set-Content -Encoding utf8 "$Stage/SOURCE.txt"
+
+          Compress-Archive -Path "$Stage/*" -DestinationPath "dist/$Name.zip"
+          Compress-Archive -Path "$Bin/MirrorMod.pdb" -DestinationPath "dist/$Name-symbols.zip"
+
+          Get-ChildItem dist -Filter *.zip | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MirrorMod-${{ env.FULL_VERSION }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: ${{ needs.version.outputs.release == 'true' && 90 || 30 }}
+
+  release:
+    name: Publish release
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: MirrorMod-${{ needs.version.outputs.full }}
+          path: dist
+
+      - name: Extract release notes
+        shell: bash
+        run: |
+          awk -v version="$VERSION" '
+            index($0, "## [" version "]") == 1 { found = 1; next }
+            found && index($0, "## [") == 1 { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          cat notes.md
+
+      - name: Create or update release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --target "$GITHUB_SHA" \
+              --title "MirrorMod $VERSION" \
+              --notes-file notes.md \
+              --latest
+          fi

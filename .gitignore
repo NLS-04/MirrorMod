@@ -1,0 +1,11 @@
+/_build/
+/_install/
+/vcpkg/
+/.vs/
+/.claude/
+out/
+CMakeUserPresets.json
+*.log
+
+# Private planning notes.
+/hitman-mirror-mode-handoff.md

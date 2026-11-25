@@ -1,0 +1,48 @@
+MirrorMod by NLS-04
+Copyright (C) 2026 NLS-04
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program in the file LICENSE.  If not, see
+<https://www.gnu.org/licenses/>.
+
+
+Additional terms
+----------------
+
+As permitted by section 7(b) of the GNU General Public License, the
+following term applies to MirrorMod in addition to the license.
+
+Anyone who conveys MirrorMod, a modified version of it, or a work that
+contains material from it, must preserve
+
+  1. the copyright notices of NLS-04 in that material, and
+  2. the author attribution "MirrorMod by NLS-04" in the Appropriate
+     Legal Notices that the work displays. MirrorMod displays them in
+     the "About" section of its window.
+
+A modified version may name further authors next to the attribution,
+but must not remove or obscure it.
+
+
+Third-party components
+----------------------
+
+MirrorMod uses the components below. Their licenses are reproduced in
+THIRD_PARTY_NOTICES.
+
+  ZHM Mod SDK       GPL-3.0-or-later   <https://github.com/OrfeasZ/ZHMModSDK>
+  MinHook           BSD-2-Clause       <https://github.com/TsudaKageyu/minhook>
+  Dear ImGui        MIT                <https://github.com/ocornut/imgui>
+  ImPlot            MIT                <https://github.com/epezent/implot>
+  {fmt}             MIT                <https://github.com/fmtlib/fmt>
+  DirectX-Headers   MIT                <https://github.com/microsoft/DirectX-Headers>
